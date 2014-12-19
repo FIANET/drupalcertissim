@@ -1,0 +1,406 @@
+<?php
+require_once('lib/includes/includes.inc.php');
+
+/**
+ * Implements hook_help().
+ */
+function commerce_Certissim_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#commerce_Certissim':
+      $output = '';
+      $output .= '<h3>' . t('A propos') . '</h3>';
+      $output .= '<p>' . t("Le module FIA-NET Certissim identifie les commandes à  risque sans pertuber le processus d'achat. Il protège vos ventes sans vous faire perdre vos clients.") . '</p>';
+      $output .= '<p>' . t("Certissim détecte automatiquement et en quasi temps réel le risque d'impayés des commandes réalisées sur votre sites. Le système exploite jusqu'à  200 critères pour comparer les données du bon de commande avec les informations de notre base de données mutualisée.") . '</p>';
+      $output .= '<h3>' . t('Utitlisation') . '</h3>';
+      $output .= '<dl>';
+      $output .= '<dt>' . t('Côté marchand') . '</dt>';
+      $output .= '<dd>' . t("Installez et configurez le module FIA-NET Certissim. Après chaque commande validé (paiement accepté), un flux XML est automatiquement envoyé à Certissim, qui vous envoi l'évaluation de la transaction. ") . '</dd>';
+      $output .= '<dt>' . t('Côté internautes') . '</dt>';
+      $output .= '<dd>' . t("Certissim n'a pas d'impact sur le processus d'achat et n'est pas visible par vos clients.") . '</dd>';
+      return $output;
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_Certissim_menu() {
+    $items = array();
+
+    $items['admin/commerce/config/Certissim'] = array(
+        'title' => 'FIA-NET Certissim',
+        'description' => 'Configuration du module Certissim.',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('commerce_Certissim_settings_form'),
+        'access arguments' => array('administer store'),
+        'file' => 'commerce_Certissim.pages.inc',
+    );
+
+    return $items;
+}
+/**
+ * Ajout de la colonne dans le back office
+ * 'handler' => 'commerce_Certissim_handler_field_order_status_fianet',
+ */
+function commerce_Certissim_views_api() {
+    return array(
+        'api' => 3,
+    );
+}
+
+function commerce_Certissim_views_data() {
+    $data['commerce_order']['order_status_certissim'] = array(
+        'title' => t('Statut Certissim'),
+        'help' => t('The order status certissim.'),
+        'field' => array(
+            'handler' => 'commerce_Certissim_handler_field_url_fianet',
+            'click sortable' => TRUE,
+        ),
+        'sort' => array(
+            'handler' => 'views_handler_sort_url',
+        ),
+        'filter' => array(
+            'handler' => 'views_handler_filter_url',
+        ),
+    );
+   return $data;
+}
+
+
+/**
+ * Implements hook_init().
+ */
+function commerce_Certissim_init() {
+    global $conf;
+    $conf['i18n_variables'][] = 'commerce_Certissim_method_title';
+    $conf['i18n_variables'][] = 'commerce_Certissim_checkout_button';
+}
+
+
+/*****  preparation et envoi des flux XML vers FIA-NET  *******/
+function commerce_Certissim_commerce_order_presave($order){
+    if (isset($order->status)) {
+        if ($order->status == 'completed') {
+			$stat = db_query("SELECT order_status_certissim FROM {commerce_order} WHERE order_id = '" . $order->order_id . "' ")->fetchAll();
+			if ($stat[0]->order_status_certissim != '1') {
+                if (variable_get('commerce_certissim_activation', '') == "1") {
+                    //loads Sac params
+                    $sac = new Certissim();
+                    $control = new CertissimControl();
+					
+                    /*  *******	initialisation du gestionnaire d'erreurs de flux  ******* */
+                    $error = 0;
+					
+                    /* *********  Recuperation du Site ID ***************                 */
+                    $siteid = variable_get('commerce_certissim_siteid', '');
+                    
+// Recuperation des infos utilisateur                                        
+$wrapper = entity_metadata_wrapper('commerce_order', $order);
+$addressfact = $wrapper->commerce_customer_billing->commerce_customer_address->value();
+$addresslivr = $wrapper->commerce_customer_shipping->commerce_customer_address->value();
+$total = $wrapper->commerce_order_total->amount->value();
+//Numero de telephone ajouter en creant un nouveau champ dans le formulaire profile type (Billing information/SHIPPING information)
+//Modifier la valeur 'telephone' dans 'field_telephone' par le nom du champ renseign� sur votre site
+$telephonefact = $wrapper->commerce_customer_billing->field_telephone->value();
+$telephonelivr = $wrapper->commerce_customer_shipping->field_telephone->value();
+// Recuperation de(s) id produit(s) command�(s)
+$product_ids = array();
+foreach ($wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+  if (in_array($line_item_wrapper->type->value(), commerce_product_line_item_types())) {
+      $product_ids[] = $line_item_wrapper->commerce_product->raw();
+  }
+}
+
+if(empty($addressfact['phone_number'])){
+    $phone_number_fact = $telephonefact;
+}
+else{
+    $phone_number_fact = $addressfact['phone_number'];
+}
+if(empty($addresslivr['phone_number'])){
+    $phone_number_ship = $telephonelivr;
+}
+else {
+    $phone_number_ship = $addresslivr['phone_number'];
+}
+
+
+                                /* ***** verification du pays facturation et livraison * **** */
+					$allowedCountries = array(
+						'AT', //Autriche
+						'BE', //Belgique
+						'BG', //Bulgarie
+						'CH', //Suisse
+						'CY', //Chypre
+						'CZ', //République tchèque
+						'DE', //Allemagne
+						'DK', //Danemark
+						'EE', //Estonie
+						'ES', //Espagne
+						'FI', //Finlande
+						'FR', //France
+						'GB', //Royaume-Uni
+						'GF', //Guyane française
+						'GP', //Guadeloupe
+						'GR', //Grèce
+						'HU', //Hongrie
+						'IE', //Irlande
+						'IT', //Italie
+						'LT', //Lituanie
+						'LU', //Luxembourg
+						'LV', //Lettonie
+						'MC', //Monaco
+						'MQ', //Martinique
+						'MT', //Malte
+						'NL', //Pays-Bas
+						'PL', //Pologne
+						'PT', //Portugal
+						'RE', //Réunion
+						'RO', //Roumanie
+						'SE', //Suède
+						'SI', //Slovénie
+						'SK', //Slovaquie
+						'YT', //Mayotte
+					);
+					
+					// Pas d'envoi sur les paiements ayant pour adresse un pays non géré par Certissim
+					if (!(in_array($addressfact['country'], $allowedCountries) && in_array($addresslivr['country'], $allowedCountries))) {
+						insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : pays non autorisé." );
+						$error = 1;
+					}
+					
+					if ($error != 1) {
+						/* ***** Recupération des informations utilisateur Facturation  * *** */
+						$utilisateur1 = $control->createInvoiceCustomer('Monsieur', $addressfact['last_name'], $addressfact['first_name'], $order->mail, $addressfact['organisation_name'] , $addressfact['mobile_number'], $phone_number_fact, '' ,$addressfact['fax_number']);
+						$addresse1 = $control->createInvoiceAddress($addressfact['thoroughfare'], $addressfact['postal_code'], $addressfact['locality'], $addressfact['country'], $addressfact['premise']);
+						//Recupération des information utilisateur Livraison
+						$utilisateur2 = $control->createDeliveryCustomer('Monsieur', $addresslivr['last_name'], $addresslivr['first_name'], '', $addresslivr['organisation_name'], $addresslivr['mobile_number'], $phone_number_ship, '' ,$addresslivr['fax_number']);
+					}
+					
+					if ($siteid) {
+						$order_details = $control->createOrderDetails($order->order_id, $siteid, $total/100, 'eur', $_SERVER['REMOTE_ADDR'], date('Y-m-d H:i:s'));
+					} else {
+						insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : SiteID non renseigné. " );
+						$error = 1;
+					}
+					
+					/*     ************* Produit ************** */
+					$product_list = $order_details->createProductList();  
+					foreach ($order->commerce_line_items['und'] as $line) {
+						$line_item = commerce_line_item_load($line['line_item_id']);
+						
+						if (isset($line_item->commerce_product['und'])){
+							$product_ids = $line_item->commerce_product['und'];
+							
+							foreach ($product_ids as $productid){
+									$produits = commerce_product_load_multiple(array($productid), array());									
+									foreach ($produits as $key => $product) {
+										$nb_product =  explode('.',$line_item->quantity);
+										$quantity = $nb_product[0];
+										$type_produits = variable_get('commerce_certissim_product_types' .$product->type, '');
+										$product_list->createProduct($product->title, $product->sku, $type_produits, $product->commerce_price['und']['0']['amount']/100, $quantity);
+
+										if (empty($product->title)){
+											insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : ref produit " . $product->product_id . " Nom vide. " );
+											$error = 1;
+										}
+										if (empty($product->sku)){
+											insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : ref produit " . $product->product_id . " Ref vide. " );
+											$error = 1;
+										}
+										if (empty($type_produits)){
+											insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : ref produit " . $product->product_id . " Type produit vide. " );
+											$error = 1;
+										}
+										if (empty($quantity)){
+											insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : ref produit " . $product->product_id . " Quantité produit vide. " );
+											$error = 1;
+										}
+									}
+								}
+							}
+						}
+                                               
+					/* **** ****** Recuperation des informations Transporteur  ********** */
+
+                                        $transport_id = '';
+					$transport_name = $line_item->line_item_label;
+					switch ($transport_name){
+						case 'home delivery' :
+							$transport_id = 'socolissimo_home_delivery';
+							break;
+						case 'appointment' :
+							$transport_id = 'socolissimo_appointment';
+							break;
+						case 'cityssimo' :
+							$transport_id = 'socolissimo_cityssimo';
+							break;
+						case 'poste office' :
+							$transport_id = 'socolissimo_post_office';
+							break;
+						case 'local store' :
+							$transport_id = 'socolissimo_local_store';
+							break;
+						default :
+							if (db_table_exists("commerce_flat_rate_service")) {
+								$result = db_query("SELECT name, display_title FROM {commerce_flat_rate_service} WHERE display_title='". $transport_name ."'")->fetchall();
+								if (!empty($result))
+									$transport_id = $result[0]->name;
+							}
+							if ($transport_id == "")
+								$transport_id = $transport_name;
+							break;
+					}
+					
+					$transport_type = variable_get('commerce_certissim_transport_types' .$transport_id, '');
+					$transport_speed = variable_get('commerce_certissim_transport_speed' . $transport_id, '');
+					
+					if ($transport_name && $transport_type && $transport_speed) {
+						if ($transport_type == 1) {
+							$carrier = $order_details->createCarrier($transport_name, $transport_type, $transport_speed);
+													
+							$ruemagasin = variable_get('commerce_certissim_rue', '');
+							$cpmagasin = variable_get('commerce_certissim_codepostal', '');
+							$villemagasin = variable_get('commerce_certissim_ville', '');
+							$paysmagasin = variable_get('commerce_certissim_pays','');
+											
+							if($ruemagasin && $cpmagasin && $villemagasin) {
+                                                            $drop_off_point_address = $control->createAddress('',$ruemagasin, $cpmagasin, $villemagasin, $paysmagasin, '');
+                                                            $drop_off_point = $carrier->createDropOffPoint($transport_name, '', $drop_off_point_address);
+							}
+						} elseif ($transport_type == 2 || $transport_type == 3) {
+							$carrier = $order_details->createCarrier($transport_name, $transport_type, $transport_speed);
+						}elseif ($transport_type == 5) {
+							$carrier = $order_details->createCarrier($transport_name, $transport_type, $transport_speed); 
+                                                }elseif ($transport_type == 4) {
+							$carrier = $order_details->createCarrier($transport_name, $transport_type, $transport_speed);
+							
+							//Recupération des information adresse Livraison
+							$addresse2 = $control->createDeliveryAddress($addresslivr['thoroughfare'], $addresslivr['postal_code'], $addresslivr['locality'], $addresslivr['country'], $addresslivr['premise']);
+						}
+					} else {
+						insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $_GET['refid'] . " Erreur : transporteur non récupérable." );
+						$error = 1;
+					}
+					
+					/*   *******   ** Paiement  ** ************ **   */
+					$payment_title = explode('|',$order->data['payment_method']);
+					$paiement_type_fia = variable_get('commerce_certissim_payment_types' . $payment_title['0'],'');
+
+					if ($paiement_type_fia){
+						switch ($paiement_type_fia) {
+							case 1:
+								$pay = "carte";
+								break;
+							case 2:
+								$pay = "cheque";
+								break;
+							case 3:
+								$pay = "contre-remboursement";
+								break;
+							case 4:
+								$pay = "virement";
+								break;
+							case 5:
+								$pay = "cb en n fois";
+								break;
+							case 6:
+								$pay = "paypal";
+								break;
+							case 7:
+								$pay = "1euro.com";
+								break;
+							case 8:
+								$pay = "Kwixo";
+								break;
+						}
+						$control->createPayment($pay, $payment_title['0']);
+					} else {	
+						insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Erreur : type paiement FIA-NET non renseigné." );
+						$error = 1;
+					}
+
+					/*  ************* order sending    *****  ****** */
+					if ($error == '0'){
+						if ($payment_title[0] != 'kwixo' && $payment_title[0] !='kwixocpt' && $payment_title[0] !='kwixoc') {
+							$stack = new CertissimStack();
+							$stack->addControl($control);
+							
+							/* ********** *** envoi du flux XML   **********   */  
+							$validstack = $sac->sendStacking($stack);
+							
+							$dom = new CertissimStackingResponse($validstack);
+							$dom->saveXML();
+							
+							if ($dom->hasFatalError())
+								echo $dom->getFatalError();
+							else {
+								foreach ($dom->getResults() as $result) {
+									db_query("UPDATE {commerce_order} SET order_status_certissim = '" . $result->getStatus() . "|" . variable_get('commerce_certissim_status') . "' WHERE {commerce_order}.`order_id` ='" . $result->getRefid() . "'");
+									insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Etat: " . $result->getDetail() . " .");
+									insertLogCertissim(__METHOD__ . ' : ' . __LINE__,"transaction reference " . $order->order_id . " Avancement: " . $result->getStatus() . " .");
+								}
+							}
+						}
+				       }
+                               }
+                       }
+               }
+      }
+}
+
+function commerce_Certissim_cron() {
+	$sac = new Certissim();
+
+	//Récupération des évaluations
+	$orders = db_query("SELECT * FROM {commerce_order} WHERE order_status_certissim = 'encours|" . variable_get('commerce_certissim_status') ."' ORDER BY order_id DESC")->fetchall();
+	
+	$count = 0;$list_ref = "";
+	foreach ($orders as $order) {
+		//25 commandes maximum par script
+		if ($count < 25) {
+			$count++;
+			$list_ref[$count] = $order->order_id;
+		}
+	}
+	
+	if($count > 0) {
+		//Récupération des évaluations
+		$stack = $sac->getValidstackByReflist($list_ref);
+		$dom_stack = new CertissimGetValidstackByRefsResponse($stack);
+		foreach ($dom_stack->getResults() as $dom_result) {
+			if ($dom_result->getRetour() == "absente") {
+				db_query("UPDATE {commerce_order} SET order_status_certissim = '" . $dom_result->getRetour() . "|". variable_get('commerce_certissim_status') . "' WHERE {commerce_order}.`order_id` ='" . $dom_result->getRefid() . "'");
+			} else {
+				foreach ($dom_result->getTransactions() as $dom_transaction) {
+					//si la dernière transaction reçue a obtenue une évaluation
+					if ($dom_transaction->isScored()) {
+						db_query("UPDATE {commerce_order} SET order_status_certissim = '" . $dom_transaction->getScore() . "|". variable_get('commerce_certissim_status') . "' WHERE {commerce_order}.`order_id` ='" . $dom_result->getRefid() . "'");
+						break;
+					}
+					//si la dernière transaction reçue est invalide
+					if (($dom_transaction->hasXMLError())) {
+						db_query("UPDATE {commerce_order} SET order_status_certissim = 'error|". variable_get('commerce_certissim_status') . "' WHERE {commerce_order}.`order_id` ='" . $dom_result->getRefid() . "'");
+						break;
+					}
+				}
+                        }
+                }
+	}
+	
+	/* ******** Récupération des réévaluations  ******* */
+    $result = $sac->getAlert('new');
+	$dom_result = new CertissimGetValidstackByDateResponseResult($result);
+	
+	foreach ($dom_result->getTransactions() as $dom_transaction) {
+		//Si la Refid existe dans la base de données alors elle est mise à  jour
+		$order = db_query("SELECT * FROM {commerce_order} WHERE order_id = '" . $dom_transaction->getRefid() ."'")->fetchall();
+		if ($order && $dom_transaction->isScored()) {
+			db_query("UPDATE {commerce_order} SET order_status_certissim = '" . $dom_transaction->getScore() . "|". variable_get('commerce_certissim_status') . "' WHERE {commerce_order}.`order_id` ='" . $dom_transaction->getRefid() . "'");
+		}
+	}
+}
+
+function commerce_Certissim_update_commerce_order() {
+    //var_dump("update uc order");
+}
